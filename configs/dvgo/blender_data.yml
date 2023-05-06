@@ -1,0 +1,80 @@
+iters: 20000
+
+image_batch_size: -1   # sample batch of rays from all images at each iteration
+ray_batch_size: 256
+image_resampling_interval: -1
+
+train_metrics:
+  - type: PSNRMeter
+
+val_metrics:
+  - type: PSNRMeter
+  - type: SSIMMeter
+
+train_dataset:
+  type: BlenderDataset
+  dataset_root: data/nerf_synthetic/lego
+  camera_scale_factor: 1.0
+  background_color: white
+  transforms:
+    - type: LoadImage
+    - type: Normalize
+    - type: AlphaBlending
+  split: train
+
+  val_dataset:
+  type: BlenderDataset
+  dataset_root: data/nerf_synthetic/lego
+  camera_scale_factor: 1.0
+  background_color: white
+  transforms:
+    - type: LoadImage
+    - type: Normalize
+    - type: AlphaBlending
+  split: val
+
+optimizer:    # todo: masked adam
+  type: Adam
+  beta1: .9
+  beta2: .99
+  epsilon: 1.0e-8
+  weight_decay: 1.0e-6
+  multi_precision: True
+
+lr_scheduler:
+  type: CustomExponentialDecay
+  lr_init: 0.001 #  tofix: rgb net: 0.001, k0,density 0.1
+  lr_final: 0.
+  max_steps: 1000000
+  lr_delay_steps: 20000
+  lr_delay_mult: 0.1
+
+aabb: &aabb [-1.3, -1.3, -1.3, 1.3, 1.3, 1.3] # if all done, aabb should be acquired automaticly
+model:
+  type: DVGO
+  coarse_stage_sampler: 
+    type: VolumetricSampler
+    occupancy_grid:
+      type: OccupancyGrid
+      resolution: 100
+      contraction_type: 0    # AABB
+      aabb: *aabb
+    grid_update_interval: 10000000 # DO NOT NEED UPDATE
+    step_size: .005
+
+  field: 
+    type: DVGOGrid
+    aabb: *aabb 
+    alpha_init_coarse: 1.0e-6 # set coarse stage: softplus shift  
+    alpha_init_fine: 1.0e-2 # set fine stage: softplus shift
+    init_resolution_coarse: 100
+    init_resolution_fine: 160
+    k0_dim_fine: 12 # channel of feature grid
+    # set rgb net
+    viewbase_pe: 4 # frequency encode
+    rgbnet_hidden_num: 128
+    rgbnet_number_layers: 2
+
+
+
+

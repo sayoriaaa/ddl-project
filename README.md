@@ -21,3 +21,19 @@
 
 ## License
 PaddleRendering 遵循 [Apache-2.0开源协议](../../LICENSE)。
+
+## My Test
+
+```
+export PYTHONPATH='.'
+python tools/train.py \
+  --config configs/dvgo/blender_data.yml \
+  --save_dir dvgo_blender \
+  --log_interval 500 \
+  --save_interval 2000
+  
+python tools/evaluate.py \
+  --config configs/dvgo/blender_data.yml \
+  --model dvgo_blender/iter_20000/model.pdparams
+```
+
