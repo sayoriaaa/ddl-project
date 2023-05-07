@@ -57,13 +57,20 @@ class DVGOGrid(BaseField):
                  viewbase_pe: int = 4,          
                  rgbnet_hidden_num: int = 128,
                  rgbnet_number_layers: int = 2,
+                 rgbnet_type: str = 'rgb_direct',
                  sh_levels: int = 2):
         super(DVGOGrid, self).__init__()
 
-        self.aabb = paddle.to_tensor(aabb, dtype="float32").reshape([-1, 3])
+        self.aabb = paddle.to_tensor(aabb, dtype="float32").reshape([-1, 3]) # -> (2,3)
+
+        self.rgbnet_type = rgbnet_type
+        if rgbnet_type == 'rgb_direct':
+            rgb_input_dim = 3 + 3*viewbase_pe*2 + k0_dim_fine
+        if rgbnet_type == 'rgb_spec':
+            rgb_input_dim = 3 + 3*viewbase_pe*2 + k0_dim_fine - 3
       
         self.rgb_net = MLP(
-            input_dim = 3 + 3*viewbase_pe*2 + k0_dim_fine,
+            input_dim = rgb_input_dim,
             output_dim = 3,
             hidden_dim = rgbnet_hidden_num,
             num_layers = rgbnet_number_layers,
@@ -71,7 +78,7 @@ class DVGOGrid(BaseField):
             output_activation = 'sigmoid',
         )
 
-        self.fea_encoder = NeRFEncoder(
+        self.dir_encoder = NeRFEncoder(
             min_freq = 0,
             max_freq = viewbase_pe - 1,
             num_freqs = viewbase_pe,
@@ -108,7 +115,7 @@ class DVGOGrid(BaseField):
             [init_resolution_coarse] * 3)
         self.register_buffer("coarse_grid_ids", coarse_grid_ids, persistable=True)
 
-        self.coarse_voxel_size = 
+        self.coarse_voxel_size = (paddle.prod(self.aabb[1] - self.aabb[0]).item() / self.resolution_coarse**3)**(1/3)    
         
         # build fine stage grid
         self.feat_f = self.create_parameter(
@@ -128,71 +135,177 @@ class DVGOGrid(BaseField):
             [init_resolution_fine] * 3)
         self.register_buffer("fine_grid_ids", fine_grid_ids, persistable=True)
 
+        self.fine_voxel_size = (paddle.prod(self.aabb[1] - self.aabb[0]).item() / self.resolution_fine**3)**(1/3)    
 
+        # determine stage
+        self.stage = 'coarse'
+        self.voxel_size = self.coarse_voxel_size
+        self.resolution = self.resolution_coarse
+
+    def go_go_fine_stage(self):
+        self.stage = 'fine'
+        self.voxel_size = self.fine_voxel_size
+        self.resolution =self.resolution_fine
         
     
     
     def soft_plus_bias(self, alpha_init: float):
         return math.log((1-alpha_init)**(-1/self.voxel_size)-1) # Eq.(9)
 
+    def _get_neighbors(self, positions: paddle.Tensor
+                       ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+        neighbor_offsets = paddle.to_tensor(
+            [[-1, -1, -1], [-1, -1, 1], [-1, 1, -1], [-1, 1, 1], [1, -1, -1],
+             [1, -1, 1], [1, 1, -1], [1, 1, 1]],
+            dtype="float32") * self.voxel_size / 2.0  # [8, 3]
+        
+        direct_neighbors = positions.unsqueeze(-2) + neighbor_offsets.unsqueeze(0) # without considering boundary [N, 8, 3]
+        neighbors = paddle.stack([
+            paddle.clip(direct_neighbors[...,0],self.aabb[0,0].item(),self.aabb[1,0].item()),
+            paddle.clip(direct_neighbors[...,1],self.aabb[0,1].item(),self.aabb[1,1].item()),
+            paddle.clip(direct_neighbors[...,2],self.aabb[0,2].item(),self.aabb[1,2].item())],axis=-1)
+        
+        direct_neighbor_centers = (paddle.floor(neighbors / self.voxel_size + 1e-5) + 0.5) * self.voxel_size
+        neighbor_centers = paddle.stack([
+            paddle.clip(direct_neighbor_centers[...,0],self.aabb[0,0].item()+ self.voxel_size / 2, self.aabb[1,0].item() - self.voxel_size / 2),
+            paddle.clip(direct_neighbor_centers[...,1],self.aabb[0,1].item()+ self.voxel_size / 2, self.aabb[1,1].item() - self.voxel_size / 2),
+            paddle.clip(direct_neighbor_centers[...,2],self.aabb[0,2].item()+ self.voxel_size / 2, self.aabb[1,2].item() - self.voxel_size / 2)],axis=-1) # [N, 8, 3]
+        
+        neighbor_indices = (
+            paddle.floor(neighbor_centers / self.voxel_size + 1e-5)
+            + self.resolution / 2.0).astype("int32").clip(
+                0, self.resolution - 1)  # [N, 8, 3]
+
+        return neighbor_centers, neighbor_indices
+    
+    def _lookup(self,
+                indices: paddle.Tensor) -> Tuple[paddle.Tensor, paddle.Tensor]:
+        selected_ids = paddle.gather_nd(self.grid_ids, indices)  # [N, 8]
+        empty_mask = selected_ids < 0.  # empty voxels have negative ids
+        selected_ids = paddle.clip(selected_ids, min=0)
+
+        if self.stage == 'coarse':
+            neighbor_densities = paddle.gather_nd(self.densities_c,
+                                              selected_ids[..., None])
+            neighbor_densities[empty_mask] = 0.
+
+            neighbor_feat = paddle.gather_nd(self.feat_c,
+                                              selected_ids[..., None])
+            neighbor_feat[empty_mask] = 0.
+
+        if self.stage == 'fine':
+            neighbor_densities = paddle.gather_nd(self.densities_f,
+                                              selected_ids[..., None])
+            neighbor_densities[empty_mask] = 0.
+
+            neighbor_feat = paddle.gather_nd(self.feat_f,
+                                              selected_ids[..., None])
+            neighbor_feat[empty_mask] = 0.
+        
+
+        return neighbor_densities, neighbor_feat
+    
+    def _get_trilinear_interp_weights(self, interp_offset):
+        """
+        interp_offset: [N, num_intersections, 3], the offset (as a fraction of voxel_len)
+            from the first (000) interpolation point.
+        """
+        interp_offset_x = interp_offset[..., 0]  # [N]
+        interp_offset_y = interp_offset[..., 1]  # [N]
+        interp_offset_z = interp_offset[..., 2]  # [N]
+        weight_000 = (1 - interp_offset_x) * (1 - interp_offset_y) * (
+            1 - interp_offset_z)
+        weight_001 = (1 - interp_offset_x) * (
+            1 - interp_offset_y) * interp_offset_z
+        weight_010 = (1 - interp_offset_x) * interp_offset_y * (
+            1 - interp_offset_z)
+        weight_011 = (1 - interp_offset_x) * interp_offset_y * interp_offset_z
+        weight_100 = interp_offset_x * (1 - interp_offset_y) * (
+            1 - interp_offset_z)
+        weight_101 = interp_offset_x * (1 - interp_offset_y) * interp_offset_z
+        weight_110 = interp_offset_x * interp_offset_y * (1 - interp_offset_z)
+        weight_111 = interp_offset_x * interp_offset_y * interp_offset_z
+
+        weights = paddle.stack([
+            weight_000, weight_001, weight_010, weight_011, weight_100,
+            weight_101, weight_110, weight_111
+        ],
+                               axis=-1)  # [N, 8]
+
+        return weights
+
+    def _trilinear_interpolation(
+            self, positions: paddle.Tensor, neighbor_centers: paddle.Tensor,
+            neighbor_densities: paddle.Tensor, neighbor_feat: paddle.Tensor
+    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
+        interp_offset = (
+            positions - neighbor_centers[..., 0, :]) / self.voxel_size  # [N, 3]
+        interp_weights = self._get_trilinear_interp_weights(
+            interp_offset)  # [N, 8]
+
+        densities = paddle.sum(
+            interp_weights * neighbor_densities, axis=-1,
+            keepdim=True)  # [N, 1]
+        feat = paddle.sum(
+            interp_weights[..., None] * neighbor_feat,
+            axis=-2)  # [N, k0_dim]
+
+        return densities, feat
+    
     def get_density(self, ray_samples: Union[RaySamples, paddle.Tensor]
                     ) -> Tuple[paddle.Tensor, paddle.Tensor]:
         if isinstance(ray_samples, RaySamples):
-            pos_inputs = ray_samples.frustums.positions
+            positions = ray_samples.frustums.positions
         else:
-            pos_inputs = ray_samples
-        positions = self.get_normalized_positions(pos_inputs)
-        positions = positions * 2 - 1
-
-        density_raw = self.density_encoder(positions)
+            positions = ray_samples
 
         # dvgo post activation
+        # Find the 8 neighbors of each positions
+        neighbor_centers, neighbor_indices = self._get_neighbors(
+            positions)  # [N, 8, 3], [N, 8, 3]
+
+        # Look up neighbors' densities and SH coefficients
+        neighbor_densities, neighbor_feat = self._lookup(
+            neighbor_indices)  # [N, 8], [N, 8, k0_dim]
+
+        # Tri-linear interpolation
+        densities_raw, feat = self._trilinear_interpolation(
+            positions, neighbor_centers, neighbor_densities,
+            neighbor_feat)  # [N, 1], [N, k0_dim]
+
+        # apply softplus
         soft_plus = F.softplus()
 
         alpha_init = self.alpha_init_fine
         if self.in_coarse_stage:
             alpha_init = self.alpha_init_coarse
 
-        density = soft_plus(density_raw + self.soft_plus_bias(alpha_init))
+        density = soft_plus(densities_raw + self.soft_plus_bias(alpha_init))
 
-        return density, positions
-
-    def density_L1(self):
-        if isinstance(self.density_encoder, TensorCPEncoder):
-            density_L1_loss = paddle.mean(paddle.abs(self.density_encoder.line_coef)) + \
-                      paddle.mean(paddle.abs(self.color_encoder.line_coef))
-        elif isinstance(self.density_encoder, TensorVMEncoder):
-            density_L1_loss = paddle.mean(paddle.abs(self.density_encoder.line_coef)) + \
-                      paddle.mean(paddle.abs(self.color_encoder.line_coef)) + \
-                      paddle.mean(paddle.abs(self.density_encoder.plane_coef)) + \
-                      paddle.mean(paddle.abs(self.color_encoder.plane_coef))
-        elif isinstance(self.density_encoder, TriplaneEncoder):
-            density_L1_loss = paddle.mean(paddle.abs(self.density_encoder.plane_coef)) + \
-                      paddle.mean(paddle.abs(self.color_encoder.plane_coef))
-
-        return density_L1_loss
+        return density, feat
 
     def get_outputs(self, ray_samples: RaySamples,
-                    geo_features: paddle.Tensor) -> Dict[str, paddle.Tensor]:
-        positions = self.get_normalized_positions(
-            ray_samples.frustums.positions)
-        d = ray_samples.frustums.directions
-        positions = positions * 2 - 1
-        rgb_features = self.color_encoder(positions)
-        rgb_features = self.B(rgb_features)
+                    feat: paddle.Tensor) -> Dict[str, paddle.Tensor]:
+        
+        if self.stage == 'coarse':
+            color = F.sigmoid(feat)
+        if self.stage == 'fine':
+            d = ray_samples.frustums.directions
+            if self.rgbnet_type == 'rgb_direct':
+                k0_view = feat 
+            if self.rgbnet_type == 'rgb_spec':
+                k0_view = feat[:, 3:]
 
-        d_encoded = self.dir_encoder(d)
-        rgb_features_encoded = self.fea_encoder(rgb_features)
+            k0_diffuse = feat[:, :3]
+            d_encoded = self.dir_encoder(d)
+        
+            rgb_feat = paddle.concat([k0_view, d_encoded], axis=-1)
+            rgb_logit = self.rgb_net(rgb_feat)
 
-        if self.use_sh:
-            sh_mult = paddle.unsqueeze(self.sh(d), axis=-1)
-            rgb_sh = rgb_features.reshape([sh_mult.shape[0], -1, 3])
-            color = F.relu(paddle.sum(sh_mult * rgb_sh, axis=-2) + 0.5)
-        else:
-            color = self.color_head(
-                paddle.concat(
-                    [rgb_features, d, rgb_features_encoded, d_encoded],
-                    axis=-1))  # type: ignore
+            if self.rgbnet_type == 'rgb_direct':
+                color = F.sigmoid(rgb_logit)
+            if self.rgbnet_type == 'rgb_spec':
+                color = F.sigmoid(rgb_logit + k0_diffuse)
         return dict(rgb=color)
 
     def get_normalized_positions(self, positions: paddle.Tensor):

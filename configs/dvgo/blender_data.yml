@@ -74,6 +74,7 @@ model:
     viewbase_pe: 4 # frequency encode
     rgbnet_hidden_num: 128
     rgbnet_number_layers: 2
+    rgbnet_type: 'rgb_direct' # support 'rgb_direct', 'rgb_spec': rgbnet use all feature as nn input, while spec use [3:] (meaning: [:3] regarded as diffuse component, nn deals with spec part)
 
 
 
