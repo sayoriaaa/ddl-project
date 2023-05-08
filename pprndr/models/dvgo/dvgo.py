@@ -49,7 +49,10 @@ class DVGO(nn.Layer):
             ray_bundle = sample
 
         with paddle.no_grad():
-            ray_samples = self.ray_sampler(ray_bundle, plenoxel_grid=self.field)
+            ray_samples = self.ray_sampler(
+                ray_bundle=ray_bundle,
+                cur_iter=cur_iter,
+                density_fn=self.field.density_fn)
 
         field_outputs = self.field(ray_samples)
 

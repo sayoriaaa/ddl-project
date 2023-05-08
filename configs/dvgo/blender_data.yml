@@ -1,4 +1,4 @@
-iters: 20000
+iters: 8000
 
 image_batch_size: -1   # sample batch of rays from all images at each iteration
 ray_batch_size: 256

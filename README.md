@@ -34,6 +34,8 @@ python tools/train.py \
   
 python tools/evaluate.py \
   --config configs/dvgo/blender_data.yml \
-  --model dvgo_blender/iter_20000/model.pdparams
+  --model dvgo_blender/iter_4000/model.pdparams
 ```
+
+
 

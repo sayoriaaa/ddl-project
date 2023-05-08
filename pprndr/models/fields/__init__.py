@@ -18,3 +18,4 @@ from .nerf_field import NeRFField
 from .plenoxels_field import PlenoxelGrid
 from .ref_nerf_field import RefNeRFField
 from .tensorf_field import TensoRFField
+from .dvgo_field import DVGOGrid

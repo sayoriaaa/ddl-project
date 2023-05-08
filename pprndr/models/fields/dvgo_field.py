@@ -180,7 +180,10 @@ class DVGOGrid(BaseField):
     
     def _lookup(self,
                 indices: paddle.Tensor) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        selected_ids = paddle.gather_nd(self.grid_ids, indices)  # [N, 8]
+        if self.stage == 'coarse':
+            selected_ids = paddle.gather_nd(self.coarse_grid_ids, indices)  # [N, 8]
+        if self.stage == 'fine':
+            selected_ids = paddle.gather_nd(self.fine_grid_ids)
         empty_mask = selected_ids < 0.  # empty voxels have negative ids
         selected_ids = paddle.clip(selected_ids, min=0)
 
@@ -274,7 +277,7 @@ class DVGOGrid(BaseField):
             neighbor_feat)  # [N, 1], [N, k0_dim]
 
         # apply softplus
-        soft_plus = F.softplus()
+        soft_plus = nn.Softplus()
 
         alpha_init = self.alpha_init_fine
         if self.in_coarse_stage:
@@ -320,8 +323,8 @@ class DVGOGrid(BaseField):
         return normalized_positions
 
     def forward(self, ray_samples: RaySamples) -> Dict[str, paddle.Tensor]:
-        density, _ = self.get_density(ray_samples)
-        output = self.get_outputs(ray_samples, None)
+        density, feat = self.get_density(ray_samples)
+        output = self.get_outputs(ray_samples, feat)
         rgb = output["rgb"]
 
         return {"density": density, "rgb": rgb}
