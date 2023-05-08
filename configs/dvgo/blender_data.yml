@@ -22,7 +22,7 @@ train_dataset:
     - type: AlphaBlending
   split: train
 
-  val_dataset:
+val_dataset:
   type: BlenderDataset
   dataset_root: data/nerf_synthetic/lego
   camera_scale_factor: 1.0
@@ -44,7 +44,7 @@ optimizer:    # todo: masked adam
 lr_scheduler:
   type: CustomExponentialDecay
   lr_init: 0.001 #  tofix: rgb net: 0.001, k0,density 0.1
-  lr_final: 0.
+  lr_final: 1.0e-8
   max_steps: 1000000
   lr_delay_steps: 20000
   lr_delay_mult: 0.1
@@ -61,7 +61,6 @@ model:
       aabb: *aabb
     grid_update_interval: 10000000 # DO NOT NEED UPDATE
     step_size: .005
-
   field: 
     type: DVGOGrid
     aabb: *aabb 
@@ -74,8 +73,11 @@ model:
     viewbase_pe: 4 # frequency encode
     rgbnet_hidden_num: 128
     rgbnet_number_layers: 2
-    rgbnet_type: 'rgb_direct' # support 'rgb_direct', 'rgb_spec': rgbnet use all feature as nn input, while spec use [3:] (meaning: [:3] regarded as diffuse component, nn deals with spec part)
-
-
+    rgbnet_type: 'rgb_direct' # support 'rgb_direct', 'rgb_spec': rgbnet use all feature as nn input, while spec use [3:] (meaning: [:3] regarded as diffuse component, nn deals with spec part) 
+  rgb_renderer:
+    type: RGBRenderer
+    background_color: white
+  rgb_loss:
+    type: MSELoss
 
 

@@ -20,7 +20,7 @@ import paddle.nn as nn
 from pprndr.apis import manager
 from pprndr.cameras.rays import RayBundle
 from pprndr.models.fields import BaseField
-from pprndr.models.ray_samplers import GridIntersectionSampler
+from pprndr.models.ray_samplers import VolumetricSampler
 from pprndr.ray_marching import render_weight_from_density
 
 __all__ = ["DVGO"]
@@ -29,17 +29,13 @@ __all__ = ["DVGO"]
 @manager.MODELS.add_component
 class DVGO(nn.Layer):
     def __init__(self,
-                 coarse_stage_sampler: GridIntersectionSampler,
-                 fine_stage_sampler: GridIntersectionSampler,
-                 ray_sampler: GridIntersectionSampler,
+                 coarse_stage_sampler: VolumetricSampler,
                  field: BaseField,
                  rgb_renderer: nn.Layer,
                  rgb_loss: nn.Layer = nn.MSELoss()):
         super(DVGO, self).__init__()
 
-        assert isinstance(ray_sampler, GridIntersectionSampler), \
-            "Plenoxels currently only supports GridIntersectionSampler."
-        self.ray_sampler = ray_sampler
+        self.ray_sampler = coarse_stage_sampler
         self.field = field
         self.rgb_renderer = rgb_renderer
         self.rgb_loss = rgb_loss
